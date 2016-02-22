@@ -54,7 +54,8 @@ function ZWave (id, controller) {
 		"DoorLock": 0x62,
 		"CentralScene": 0x5b,
 		"Battery": 0x80,
-		"DeviceResetLocally": 0x5a
+		"DeviceResetLocally": 0x5a,
+		"BarrierOperator": 0x66
 	};
 }
 
@@ -254,7 +255,6 @@ ZWave.prototype.externalAPIAllow = function (name) {
 	ws.allowExternalAccess(_name + ".ZMELicense", this.config.publicAPI ? this.controller.auth.ROLE.ANONYMOUS : this.controller.auth.ROLE.ADMIN);
 	ws.allowExternalAccess(_name + ".ZMEFirmwareUpgrade", this.config.publicAPI ? this.controller.auth.ROLE.ANONYMOUS : this.controller.auth.ROLE.ADMIN);
 	ws.allowExternalAccess(_name + ".ZMEBootloaderUpgrade", this.config.publicAPI ? this.controller.auth.ROLE.ANONYMOUS : this.controller.auth.ROLE.ADMIN);
-	ws.allowExternalAccess(_name + ".Blacklist", this.config.publicAPI ? this.controller.auth.ROLE.ANONYMOUS : this.controller.auth.ROLE.ADMIN);
 	ws.allowExternalAccess(_name + ".Postfix", this.config.publicAPI ? this.controller.auth.ROLE.ANONYMOUS : this.controller.auth.ROLE.ADMIN);
 	// -- see below -- // ws.allowExternalAccess(_name + ".JSONtoXML", this.config.publicAPI ? this.controller.auth.ROLE.ANONYMOUS : this.controller.auth.ROLE.ADMIN);
 };
@@ -274,7 +274,6 @@ ZWave.prototype.externalAPIRevoke = function (name) {
 	ws.revokeExternalAccess(_name + ".ZMELicense");
 	ws.revokeExternalAccess(_name + ".ZMEFirmwareUpgrade");
 	ws.revokeExternalAccess(_name + ".ZMEBootloaderUpgrade");
-	ws.revokeExternalAccess(_name + ".Blacklist");
 	ws.revokeExternalAccess(_name + ".Postfix");
 	// -- see below -- // ws.revokeExternalAccess(_name + ".JSONtoXML");
 };
@@ -854,27 +853,6 @@ ZWave.prototype.defineHandlers = function () {
 			return (result === "done") ? { status: 200, body: "Done" } : { status: 500, body: "Failed" };
 		} catch (e) {
 			return { status: 500, body: e.toString() };
-		}
-	};
-
-	this.ZWaveAPI.Blacklist = function() {
-		var blacklist = fs.loadJSON('modules/ZWave/blacklist.json');
-
-		if (!!blacklist) {
-			return {
-				status: 200,
-				headers: {
-					"Content-Type": "application/json",
-					"Connection": "keep-alive"
-				},
-				body: blacklist
-			};
-		} else {
-			return {
-				status: 500,
-				body: 'Cannot load blacklist.'
-			};
-
 		}
 	};
 
@@ -1949,6 +1927,36 @@ ZWave.prototype.parseAddCommandClass = function (nodeId, instanceId, commandClas
 					} catch (e) {}
 				}, "value");
 			}
+		} else if (this.CC["BarrierOperator"] === commandClassId && !self.controller.devices.get(vDevId)) {
+			defaults = {
+				deviceType: 'doorlock',
+				metrics: {
+					level: '',
+					icon: 'door',
+					title: compileTitle('Garage Door', vDevIdNI)
+				}
+			};
+
+			var vDev = self.controller.devices.create({
+				deviceId: vDevId,
+				defaults: defaults,
+				overlay: {},
+				handler: function(command) {
+					if ("open" === command) {
+						cc.Set(255);
+					} else if ("close" === command) {
+						cc.Set(0);
+					}
+				},
+				moduleId: self.id
+			});
+			if (vDev) {
+				self.dataBind(self.gateDataBinding, self.zway, nodeId, instanceId, commandClassId, "state", function() {
+					try {
+						vDev.set("metrics:level", this.value === 255 ? "open" : "close");
+					} catch (e) {}
+				}, "value");
+			}
 		} else if (this.CC["ThermostatMode"] === commandClassId || this.CC["ThermostatSetPoint"] === commandClassId) {
 			var
 				withMode = in_array(instanceCommandClasses, this.CC["ThermostatMode"]) && instance.ThermostatMode.data.supported.value,
@@ -2026,8 +2034,8 @@ ZWave.prototype.parseAddCommandClass = function (nodeId, instanceId, commandClas
 								metrics: {
 									scaleTitle: DH.scaleString.value,
 									level: DH.val.value,
-									min: DH.min ? DH.min.value : (DH.scale == 0 ? 5 : 41),
-									max: DH.max ? DH.max.value : (DH.scale == 0 ? 40 : 104),
+									min: DH.min ? DH.min.value : (DH.scale.value === 0 ? 5 : 41),
+									max: DH.max ? DH.max.value : (DH.scale.value === 0 ? 40 : 104),
 									icon: 'thermostat',
 									title: compileTitle("Thermostat " + (mode === MODE_HEAT ? "Heat" : "Cool"), vDevIdNI)
 								}

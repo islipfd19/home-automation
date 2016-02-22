@@ -21,7 +21,8 @@
 	"preInterview": [],
 	"postInterview": [
 		"preventDeviceCreation(0,113, {});",
-		"setConfig(0,7,22,1);"
+		"setConfig(0,7,22,1);",
+		"if(commandClassId === 132 && deviceInstances[instanceId].commandClasses[132] && c.data.lastIncludedDevice.value === nodeId){ deviceInstances[instanceId].commandClasses[132].data.security.value = false; console.log('##-------------CHANGED-VALUE-316.2.12.132---SET-WAKEUP-SECURITY-TO-FALSE---------##');}"
 	]
 }, {
 	"id": "5",
@@ -30,7 +31,8 @@
 	"preInterview": [],
 	"postInterview": [
 		"preventDeviceCreation(0,113, {});",
-		"setConfig(0,7,22,1);"
+		"setConfig(0,7,22,1);",
+		"if(commandClassId === 132 && deviceInstances[instanceId].commandClasses[132] && c.data.lastIncludedDevice.value === nodeId){ deviceInstances[instanceId].commandClasses[132].data.security.value = false; console.log('##-------------CHANGED-VALUE-316.2.2.132---SET-WAKEUP-SECURITY-TO-FALSE---------##');}"
 	]
 }, {
 	"id": "6",
@@ -39,7 +41,7 @@
 	"preInterview": [],
 	"postInterview": [
 		"preventDeviceCreation(0,156, {});",
-		"preventDeviceCreation(0,113, { '1':[2], '7':[], '8':[], '9':[] });"
+		"preventDeviceCreation(0,113, { '1':[3], '7':[], '8':[], '9':[] });"
 	]
 }, {
 	"id": "23",
@@ -114,12 +116,40 @@
 	"postInterview": [
 		"preventDeviceCreation(0,113, {});"
 	]
-},{
+}, {
 	"id": "34",
+	"p_id": "134.2.89",
+	"product": "Recessed Door Sensor Gen 5",
+	"preInterview": [],
+	"postInterview": [
+		"setConfig(121,16,4);"
+	]
+}, {
+	"id": "35",
+	"p_id": "264.2.13",
+	"product": "D Link Batterie Motion Sensor",
+	"preInterview": [],
+	"postInterview": [
+		"preventDeviceCreation(0,113,{});",
+		"preventDeviceCreation(0,48,{'8':[]});",
+		"setConfig(0,7,30,1);",
+		"setConfig(0,8,1,1);",
+		"if(commandClassId === 132 && deviceInstances[instanceId].commandClasses[132] && c.data.lastIncludedDevice.value === nodeId){ deviceInstances[instanceId].commandClasses[132].data.security.value = false; console.log('##-------------CHANGED-VALUE-264.2.13.132---SET-WAKEUP-SECURITY-TO-FALSE---------##');}"
+	]
+}, {
+	"id": "36",
 	"p_id": "340.256.259",
 	"product": "POPP Key Fob",
 	"preInterview": [],
 	"postInterview": [
 		"supportSwitchController(0,91,1,'S');"
+	]
+}, {
+	"id": "37",
+	"p_id": "21076.1.34064",
+	"product": "Remotec Portable Controller",
+	"preInterview": [],
+	"postInterview": [
+		"supportSwitchController(0,91,8,'S');"
 	]
 }]

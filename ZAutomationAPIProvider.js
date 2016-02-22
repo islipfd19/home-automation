@@ -40,6 +40,7 @@ inherits(ZAutomationAPIWebRequest, ZAutomationWebRequest);
 _.extend(ZAutomationAPIWebRequest.prototype, {
     registerRoutes: function() {
         this.router.get("/status", this.ROLE.USER, this.statusReport);
+        this.router.get("/session", this.ROLE.ANONYMOUS, this.verifySession);
         this.router.post("/login", this.ROLE.ANONYMOUS, this.verifyLogin);
         this.router.get("/logout", this.ROLE.USER, this.doLogout);
         this.router.get("/notifications", this.ROLE.USER, this.exposeNotifications);
@@ -49,7 +50,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
         this.router.get("/locations", this.ROLE.USER, this.listLocations);
         this.router.get("/profiles", this.ROLE.USER, this.listProfiles);
         this.router.get("/namespaces", this.ROLE.ADMIN, this.listNamespaces);
-        this.router.post("/profiles", this.ROLE.USER, this.createProfile);
+        this.router.post("/profiles", this.ROLE.ADMIN, this.createProfile);
         this.router.get("/locations/add", this.ROLE.ADMIN, this.addLocation);
         this.router.post("/locations", this.ROLE.ADMIN, this.addLocation);
         this.router.get("/locations/remove", this.ROLE.ADMIN, this.removeLocation);
@@ -121,83 +122,120 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
         this.router.get("/backup", this.ROLE.ADMIN, this.backup);
         this.router.post("/restore", this.ROLE.ADMIN, this.restore);
         this.router.post("/reset", this.ROLE.ADMIN, this.reset);
+        
+        this.router.get("/system/webif-access", this.ROLE.ADMIN, this.setWebifAccessTimout);
+        this.router.get("/system/trust-my-network", this.ROLE.ADMIN, this.getTrustMyNetwork);
+        this.router.put("/system/trust-my-network", this.ROLE.ADMIN, this.setTrustMyNetwork);
+
+        this.router.get("/system/time/get", this.ROLE.ANONYMOUS, this.getTime);        
+        this.router.get("/system/remote-id", this.ROLE.ANONYMOUS, this.getRemoteId);
+        this.router.get("/system/first-access", this.ROLE.ANONYMOUS, this.getFirstLoginInfo);
     },
 
-    // !!! Do we need it?
-    statusReport: function () {
-        var currentDateTime = new Date();
-
-        if (Boolean(this.error)) {
-            var reply = {
-                error: "Internal server error. Please fill in bug report with request_id='" + this.error + "'",
-                data: null,
-                code: 503,
-                message: "Service Unavailable"
-            };
-        } else {
-            var reply = {
+    // Used by the android app to request server status
+   statusReport: function () {
+        var currentDateTime = new Date(),
+            reply = {
                 error: null,
                 data: 'OK',
                 code: 200
             };
-        }
+
+        if (Boolean(this.error)) {
+            reply.error = "Internal server error. Please fill in bug report with request_id='" + this.error + "'";
+            reply.data = null;
+            reply.code = 503;
+            reply.message = "Service Unavailable";
+        } 
 
         return reply;
     },
+
+    setLogin: function(profile) {
+        var sid = crypto.guid(),
+            resProfile = {};
+        
+        this.controller.auth.checkIn(profile, sid);
+
+        resProfile = this.getProfileResponse(profile);
+        resProfile.sid = sid;
+
+        if (profile.password !== 'admin' && typeof this.controller.config.firstaccess === 'undefined' || this.controller.config.firstaccess === true) {
+            this.controller.config.firstaccess = false;
+        }
+
+        return {
+            error: null,
+            data: resProfile,
+            code: 200,
+            headers: {
+                "Set-Cookie": "ZWAYSession=" + sid + "; Path=/; HttpOnly"// set cookie - it will duplicate header just in case client prefers cookies
+            }
+        };
+    },    
+    // Method to return a 401 to the user
+    denyLogin: function(error) {
+        return {
+            error: error,
+            data: null,
+            code: 401,
+            headers: {
+                "Set-Cookie": "ZWAYSession=deleted; Path=/; HttpOnly; Expires=Thu, 01 Jan 1970 00:00:00 GMT" // clean cookie
+            }
+        }
+    },
+    // Returns user session information for the smarthome UI
+    verifySession: function() {
+        var auth = controller.auth.resolve(this.req, 2);
+        
+        if (!auth) {
+            return this.denyLogin("No valid user session found");
+        }
+        
+        var profile = _.find(this.controller.profiles, function (profile) {
+            return profile.id === auth.user;
+        });
+        
+        return this.setLogin(profile);
+    },
+    // Check if login exists and password is correct 
     verifyLogin: function() {
-        var reply = {
-                    error: null,
-                    data: null,
-                    code: 500,
-                    headers: null
-                },
-            reqObj;
+        var reqObj;
 
         try {
             reqObj = JSON.parse(this.req.body);
         } catch (ex) {
-            reply.error = ex.message;
-            return reply;
+            return {
+                error: ex.message,
+                data: null,
+                code: 500,
+                headers: null
+            };
         }
 
-        profile = _.find(this.controller.profiles, function (profile) {
+        var profile = _.find(this.controller.profiles, function (profile) {
             return profile.login === reqObj.login;
         });
 
         if (profile && reqObj.password === profile.password) {
-            var sid = crypto.guid(),
-                resProfile = {};
-            this.controller.auth.checkIn(profile, sid);
-
-            resProfile = this.getProfileResponse(profile);
-            resProfile.sid = sid;
-
-            reply.code = 200;
-            reply.data = resProfile;
-
-            reply.headers = {
-                "Set-Cookie": "ZWAYSession=" + sid + "; Path=/; HttpOnly"// set cookie - it will duplicate header just in case client prefers cookies
-            };
+            return this.setLogin(profile);
         } else {
-            reply.code = 401;
-            reply.error = "User login/password is wrong.";
-            reply.headers = {
-                "Set-Cookie": "ZWAYSession=deleted; Path=/; HttpOnly; Expires=Thu, 01 Jan 1970 00:00:00 GMT" // clean cookie
-            };
+            return this.denyLogin();
         }
-        
-        return reply;
     },
+    
     doLogout: function() {
         var reply = {
                 error: null,
                 data: null,
-                code: 500,
+                code: 400,
                 headers: null
             },
             session;
+        
+        var sessionId = this.controller.auth.getSessionId(this.req);
 
-        if (this.req.headers.ZWAYSession) {
+        if (sessionId) {
             session = this.req.headers.ZWAYSession;
 
             reply.headers = {
@@ -210,7 +248,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
                 delete this.controller.auth.sessions[session];
             }
         } else {
-            reply.error = 'Internal server error.';
+            reply.error = 'Could not logout.';
         }
         
         return reply;
@@ -1023,6 +1061,33 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
 
         return reply;
     },
+    // reinitialize modules
+    reinitializeModule: function(moduleId) {
+        var reply = {
+                error: null,
+                data: null,
+                code: 500
+            },
+            location = fs.list('userModules/' + moduleId)? 'userModules/' : 'modules/';
+
+        if (fs.list(location)) {
+            try {
+                loadSuccessfully = this.controller.reinitializeModule(moduleId, location);
+                
+                if(loadSuccessfully){
+                    reply.data = 'Reinitialization of app "' + moduleId + '" successfull.',
+                    reply.code = 200;
+                }
+            } catch (e) {
+                reply.error = e.toString();
+            }
+        } else {
+            reply.code = 404;
+            reply.error.key = "App not found.";
+        }
+        
+        return reply;
+    },
     // instances
     listInstances: function () {
         var reply = {
@@ -1195,7 +1260,9 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
             },
             reqObj,
             profile,
-            resProfile = {};
+            resProfile = {},
+            uniqueEmail = [],
+            uniqueLogin = [];
 
         try {
             reqObj = JSON.parse(this.req.body);
@@ -1203,11 +1270,21 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
             reply.error = ex.message;
         }
 
-        nameAllreadyExists = Boolean(_.find(this.controller.profiles, function (profile) {
-                                        return profile.login === reqObj.login;
-                                    }));
+        uniqueEmail = _.filter(this.controller.profiles, function (p) {
+            return p.email !== '' && p.email === reqObj.email;
+        });
 
-        if (nameAllreadyExists === false) {
+        uniqueLogin = _.filter(this.controller.profiles, function (p) {
+            return p.login !== '' && p.login === reqObj.login;
+        });
+
+        if (uniqueEmail.length > 0) {
+            reply.code = 409;
+            reply.error = 'nonunique_email';
+        } else if (uniqueLogin.length > 0) {
+            reply.code = 409;
+            reply.error = 'nonunique_user';
+        } else {
             _.defaults(reqObj, {
                 role: null,
                 name: 'User',
@@ -1224,18 +1301,12 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
             });
             profile = this.controller.createProfile(reqObj);
             if (profile !== undefined && profile.id !== undefined) {
-                
-                
-                
                 reply.data = resProfile;
                 reply.code = 201;
             } else {
                 reply.code = 500;
                 reply.error = "Profile creation error";
             }
-        } else {
-            reply.code = 400;
-            reply.error = "Argument name is required or already exists.";
         }
         
         return reply;
@@ -1258,8 +1329,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
                 reply.error = "Revoking self Admin priviledge is not allowed.";
             } else {
                 uniqueProfProps = _.filter(this.controller.profiles, function (p) {
-                    return ((p.email !== '' && p.email === reqObj.email) ||
-                                (p.login !== '' && p.login === reqObj.login)) && 
+                    return (p.email !== '' && p.email === reqObj.email) && 
                                     p.id !== profileId;
                 });
 
@@ -1294,7 +1364,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
                     }
                 } else {
                     reply.code = 409;
-                    reply.error = 'Login or e-mail already exists.';
+                    reply.error = 'nonunique_email';
                 }
             }
         } else {
@@ -1330,8 +1400,8 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
         if (profile && (this.req.role === this.ROLE.ADMIN || (this.req.role === this.ROLE.USER && this.req.user === profile.id))) {
 
             uniqueLogin = _.filter(this.controller.profiles, function (p) {
-                if (self.req.role === self.ROLE.ADMIN && self.req.user !== reqObj.id) {
-                    return p.login !== '' && p.login === reqObj.login && p.id !== reqObj.id;
+                if (self.req.role === self.ROLE.ADMIN && self.req.user !== parseInt(reqObj.id, 10)) {
+                    return p.login !== '' && p.login === reqObj.login && p.id !== parseInt(reqObj.id, 10);
                 } else {
                     return p.login !== '' && p.login === reqObj.login && p.id !== self.req.user;
                 }
@@ -1349,7 +1419,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
                 }
             } else {
                 reply.code = 409;
-                reply.error = 'Login already exists.';
+                reply.error = 'nonunique_user';
             }
         } else if (this.req.role === this.ROLE.ANONYMOUS && profileId && !!reqToken) {
             tokenObj = self.controller.auth.getForgottenPwdToken(reqToken);
@@ -1735,6 +1805,15 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
             },
             backupJSON = {};
 
+        var now = new Date();
+
+        // create a timestamp in format yyyy-MM-dd-HH-mm
+        var ts = now.getFullYear() + "-";
+        ts += ("0" + (now.getMonth()+1)).slice(-2) + "-";
+        ts += ("0" + now.getDate()).slice(-2) + "-";
+        ts += ("0" + now.getHours()).slice(-2) + "-";
+        ts += ("0" + now.getMinutes()).slice(-2);
+
         var list = loadObject("__storageContent");
 
         try {        
@@ -1765,6 +1844,11 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
                 });
             }
             */
+            reply.headers= {
+                    "Content-Type": "application/x-download",
+                    "Content-Disposition": "attachment; filename=z-way-backup-" + ts + ".zab",
+                    "Connection": "keep-alive"
+            }
             reply.code = 200;
             reply.data = backupJSON;
         } catch(e) {
@@ -1783,26 +1867,42 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
             };
 
         try {
+            function utf8Decode(bytes) {
+              var chars = [];
+            
+                for(var i = 0; i < bytes.length; i++) {
+                    chars[i] = bytes.charCodeAt(i);
+                }
+              
+              return chars;
+            }
+
             //this.reset();
             
             reqObj = JSON.parse(this.req.body.backupFile.content);
             
-            for (var obj in reqObj) {
-                if (obj === "__ZWay" || obj === "__EnOcean") break;
-                saveObject(obj, reqObj[obj]);
+            // stop the controller
+            this.controller.stop();
+
+            for (var obj in reqObj.data) {
+                var dontSave = ["__ZWay","__EnOcean"]; // objects that should be ignored 
+                
+                if (dontSave.indexOf(obj) > -1) break;
+                
+                saveObject(obj, reqObj.data[obj]);
             }
 
-            // restart controller to apply config.json and other modules configs
-            this.controller.restart();
+            // start controller with restore flag to apply config.json and other modules configs
+            this.controller.start(true);
             
             // restore Z-Wave and EnOcean
-            !!reqObj["__ZWay"] && Object.keys(reqObj["__ZWay"]).forEach(function(zwayName) {
-                var zwayData = reqObj["__ZWay"][zwayName];
+            !!reqObj.data["__ZWay"] && Object.keys(reqObj.data["__ZWay"]).forEach(function(zwayName) {
+                var zwayData = utf8Decode(reqObj.data["__ZWay"][zwayName]);
                 global.ZWave[zwayName] && global.ZWave[zwayName].zway.controller.Restore(zwayData, false);
             });
             /* TODO
-            !!reqObj["__EnOcean"] && reqObj["__EnOcean"].forEach(function(zenoName) {
-                // global.EnOcean[zenoName] && global.EnOcean[zenoName].zeno.Restore(reqObj["__EnOcean"][zenoName]);
+            !!reqObj.data["__EnOcean"] && reqObj.data["__EnOcean"].forEach(function(zenoName) {
+                // global.EnOcean[zenoName] && global.EnOcean[zenoName].zeno.Restore(reqObj.data["__EnOcean"][zenoName]);
             });
             */
             
@@ -1814,31 +1914,171 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
         
         return reply;
     },
-    // reinitialize modules
-    reinitializeModule: function(moduleId) {
+    getTime: function () {
         var reply = {
                 error: null,
                 data: null,
                 code: 500
             },
-            location = fs.list('userModules/' + moduleId)? 'userModules/' : 'modules/';
+            now = new Date();
 
-        if (fs.list(location)) {
+        if (now) {
+            reply.code = 200;
+            reply.data = {
+                localTimeUT: Math.round(now.getTime() / 1000),
+                localTimeString: now.toLocaleString(),
+                localTimeZoneOffset: now.getTimezoneOffset() /60
+            };
+        } else {
+            reply.error = 'Cannot get current date and time.';
+        }
+
+        return reply;
+    },
+    getRemoteId: function () {
+        var reply = {
+                error: null,
+                data: null,
+                code: 500
+            },
+            checkIfTypeError = true;
+
+        if (typeof ZBWConnect === 'function') {
             try {
-                loadSuccessfully = this.controller.reinitializeModule(moduleId, location);
-                
-                if(loadSuccessfully){
-                    reply.data = 'Reinitialization of app "' + moduleId + '" successfull.',
-                    reply.code = 200;
+                zbw = new ZBWConnect(); // find zbw by path or use (raspberry) location /etc/zbw as default
+
+                if(!!zbw) {
+                    checkIfTypeError = zbw.getUserId() instanceof TypeError? true : false;
                 }
+
             } catch (e) {
-                reply.error = e.toString();
+                try {
+                    zbw = new ZBWConnect('./zbw');
+
+                    checkIfTypeError = zbw.getUserId() instanceof TypeError? true : false;
+
+                } catch (er) {
+                    console.log('Something went wrong. Reading remote id has failed. Error:' + er.message);
+                }
+            }
+
+            if(checkIfTypeError) {
+                reply.error = 'Something went wrong. Reading remote id has failed.';
+            } else {
+                reply.code = 200;
+                reply.data = {
+                    remote_id: zbw.getUserId()
+                };
             }
         } else {
-            reply.code = 404;
-            reply.error.key = "App not found.";
+            reply.code = 503;
+            reply.error = 'Reading remote id has failed. Service is not available.';
         }
-        
+
+        return reply;
+    },
+    // set a timout for accessing firmware update tab of 8084
+    setWebifAccessTimout: function() {
+        var reply = {
+                error: null,
+                data: null,
+                code: 500
+            },
+            allowAcc = 0,
+            timeout = 900; // in s ~ 15 min
+
+        allowAcc = this.req.query.hasOwnProperty("allow_access") ? parseInt(this.req.query.allow_access, 10) : 0;
+        timeout = this.req.query.hasOwnProperty("timeout") ? parseInt(this.req.query.timeout, 10) : timeout;
+
+        if (allowAcc === 1 && timeout > 0 && timeout <= 1200) {
+            saveObject('8084AccessTimeout', timeout);
+            reply.code = 200;
+            reply.data = {
+                timeout: timeout
+            };
+        } else if (allowAcc === 0) {
+            saveObject('8084AccessTimeout', null);
+            reply.code = 200;
+            reply.data = {
+                timeout: null
+            };
+        } else {
+            reply.code = 400;
+            reply.error = 'Invalid Request';
+        }
+
+        return reply;
+    },
+    getFirstLoginInfo: function() {
+        var reply = {
+                error: null,
+                data: {},
+                code: 500
+            },
+            defaultProfile = [],
+            setLogin = {};
+        try {
+            defaultProfile = _.filter(this.controller.profiles, function (profile) {
+                return profile.login === 'admin' && profile.password === 'admin';
+            });
+
+            if (defaultProfile.length > 0 && (typeof this.controller.config.firstaccess === 'undefined' || this.controller.config.firstaccess)) {
+                setLogin = this.setLogin(defaultProfile[0]);
+                reply.headers = setLogin.headers; // set '/' Z-Way-Session root cookie
+                reply.data.defaultProfile = setLogin.data; // set login data of default profile
+                reply.data.firstaccess = true;
+                reply.code = 200;
+            } else {
+                reply.data = { firstaccess: false };
+                reply.code = 200;
+            }
+        } catch (e){
+            reply.data = null;
+            reply.error = e.message;
+        }
+
+        return reply;
+    },
+    getTrustMyNetwork: function() {
+        var reply = {
+                error: null,
+                data: null,
+                code: 500
+            },
+            tMN;
+
+        try {            
+            tMN = this.controller.config.trustMyNetwork? this.controller.config.trustMyNetwork : false;
+
+            reply.data = { trustMyNetwork: tMN };
+            reply.code = 200;
+        } catch (e) {
+            reply.error = 'Something went wrong: ' + e.message;
+        }
+
+        return reply;
+    },
+    setTrustMyNetwork: function() {
+        var reply = {
+                error: null,
+                data: null,
+                code: 500
+            },
+            reqObj = typeof this.req.body !== 'object'? JSON.parse(this.req.body): this.req.body;
+
+        try {
+            if (reqObj && typeof reqObj.trustMyNetwork !== 'undefined' && typeof reqObj.trustMyNetwork === 'boolean') {
+                this.controller.config.trustMyNetwork = reqObj.trustMyNetwork;
+                reply.code = 200;
+                reply.data = { trustMyNetwork: this.controller.config.trustMyNetwork };
+            } else {
+                reply.code = 400;
+                reply.error = 'Bad request.';
+            }
+        } catch (e) {
+            reply.error = 'Something went wrong: ' + e.message;
+        }
+
         return reply;
     }
 });

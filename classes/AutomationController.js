@@ -79,16 +79,17 @@ AutomationController.prototype.init = function () {
 
     self.loadModules(function () {
         self.emit("core.init");
-
-        // necessary?
-        /*self.devices.on('change', function (device) {
+        
+        // update namespaces if device title has changed
+        self.devices.on('change:metrics:title', function (device) {
             ws.push({
-                type: "me.z-wave.devices.location_update",
+                type: "me.z-wave.devices.title_update",
                 data: JSON.stringify(device.toJSON())
             });
             pushNamespaces(device, false);
-        });*/
+        });
 
+        // update only location namespaces if device location has changed
         self.devices.on('change:location', function (device) {
             ws.push({
                 type: "me.z-wave.devices.location_update",
@@ -97,6 +98,16 @@ AutomationController.prototype.init = function () {
             pushNamespaces(device, true);
         });
 
+        // update namespaces if device permanently_hidden status has changed
+        self.devices.on('change:permanently_hidden', function (device) {
+            ws.push({
+                type: "me.z-wave.devices.visibility_update",
+                data: JSON.stringify(device.toJSON())
+            });
+            pushNamespaces(device, false);
+        });
+
+        // update namespaces if structure of devices collection changed
         self.devices.on('created', function (device) {
             ws.push({
                 type: "me.z-wave.devices.add",
@@ -138,10 +149,22 @@ AutomationController.prototype.setDefaultLang = function (lang) {
 };
 
 AutomationController.prototype.saveConfig = function () {
+
+    // do clean up of location namespaces 
+    cleanupLocations = function (locations) {
+        var newLoc = [];
+
+        locations.forEach(function(loc){
+            newLoc.push(_.omit(loc, 'namespaces'));
+        });
+
+        return newLoc;
+    };
+
     var cfgObject = {
         "controller": this.config,
         "vdevInfo": this.vdevInfo,
-        "locations": this.locations,
+        "locations": cleanupLocations(this.locations),
         "profiles": this.profiles,
         "instances": this.instances,
         "modules_categories": this.modules_categories
@@ -158,7 +181,16 @@ AutomationController.prototype.saveFiles = function () {
     saveObject("files.json", this.files);
 };
 
-AutomationController.prototype.start = function () {
+AutomationController.prototype.start = function (restore) {
+    var restore = restore || false;
+
+    // if restore flag is true, overwrite config values first
+    if (restore){
+        console.log("Restore config...");
+        // Restore config
+        this.restoreConfig();
+    }
+
     // Restore persistent data
     this.loadNotifications();
 
@@ -183,6 +215,18 @@ AutomationController.prototype.start = function () {
 
     // Notify core
     this.emit("core.start");
+};
+
+AutomationController.prototype.restoreConfig = function () {    
+    var restoredConfig = loadObject("config.json");
+
+    // overwrite variables with restored data
+    this.config = restoredConfig.controller || config.controller;
+    this.profiles = restoredConfig.profiles || config.profiles;
+    this.instances = restoredConfig.instances || config.instances;
+    this.locations = restoredConfig.locations || config.locations;
+    this.vdevInfo = restoredConfig.vdevInfo || config.vdevInfo;
+    this.modules_categories = restoredConfig.modules_categories || config.modules_categories;
 };
 
 AutomationController.prototype.stop = function () {
@@ -1207,13 +1251,14 @@ AutomationController.prototype.generateNamespaces = function (callback, device, 
         nspcArr = [],
         locNspcArr = [],
         devLocation = device.get('location'),
-        location = that.getLocation(that.locations, devLocation);
+        location = that.getLocation(that.locations, devLocation),
+        devHidden = device.get('permanently_hidden');
 
         if (!!location && !location.namespaces) {
             location.namespaces = [];
         }
 
-    if (device && device.get('permanently_hidden') === false) {
+    if (device) {
 
         this.genNspc = function (nspc,vDev) {
             var devTypeEntry = 'devices_' + vDev.get('deviceType'),
@@ -1230,10 +1275,15 @@ AutomationController.prototype.generateNamespaces = function (callback, device, 
                         return entry.deviceId === devEntry.deviceId;
                     });
 
-                    if (!!devStillExists && exists.length < 1){
+                    if (!!devStillExists && exists.length < 1 && !devHidden){
                         // add entry
                         entryArr.push(devEntry);
-                    } else if (devStillExists === null) {
+                    } else if (!!devStillExists && exists[0] && !devHidden) {
+                        // change existing deviceName
+                        if (!_.isEqual(exists[0]['deviceName'], devEntry['deviceName'])) {
+                            exists[0]['deviceName'] = devEntry['deviceName'];
+                        }
+                    } else if (devStillExists === null || devHidden) {
                         // remove entry
                         entryArr = _.filter(entryArr, function(entry) {
                             return entry.deviceId !== devEntry.deviceId;
@@ -1241,6 +1291,13 @@ AutomationController.prototype.generateNamespaces = function (callback, device, 
                     }
 
                     return entryArr;
+                },
+                deleteEmptyProp = function (object, key) {
+                    // delete empty CC type entries
+                    if ((_.isArray(object[key]) && object[key].length < 1) || (!_.isArray(object[key]) && Object.keys(object[key]).length < 1)) {
+                        delete object[key];
+                    }
+                    return object;
                 },
                 cutType = [],
                 cutSubType = '',
@@ -1262,6 +1319,13 @@ AutomationController.prototype.generateNamespaces = function (callback, device, 
 
                 paramEntry = paramEntry? paramEntry : {};
 
+                // create 'none' entry to get an object with array of 'none probetype' entries
+                if (_.isArray(paramEntry)){
+                    paramEntry = {
+                        none: paramEntry
+                    };
+                }
+
                 // check for CC sub type and add device namespaces
                 if(cutType.length > 1){
 
@@ -1275,6 +1339,10 @@ AutomationController.prototype.generateNamespaces = function (callback, device, 
 
                     //check if entry is already there
                     paramEntry[cutType[0]][cutSubType] = addRemoveEntry(paramEntry[cutType[0]][cutSubType]);
+
+                    // delete empty suptype entries
+                    paramEntry[cutType[0]] = deleteEmptyProp(paramEntry[cutType[0]], cutSubType);
+                
                 // add CC type
                 } else {
                     if(!paramEntry[cutType[0]]){
@@ -1286,20 +1354,27 @@ AutomationController.prototype.generateNamespaces = function (callback, device, 
                 }
 
                 // remove CC if empty
-                if ((paramEntry[cutType[0]].size < 1) || (_.isArray(paramEntry[cutType[0]]) && paramEntry[cutType[0]].length < 1)) {
-                    delete paramEntry[cutType[0]];
-                }
+                paramEntry = deleteEmptyProp(paramEntry, cutType[0]);
+
             } else {
                 // add entries to type entries
                 paramEntry = paramEntry? paramEntry : [];
 
-                if (!_.isArray(paramEntry) && Object.keys(paramEntry).length < 1){
-                    paramEntry = [];
-
-                    paramEntry = addRemoveEntry(paramEntry);
-                } else if (_.isArray(paramEntry)){
-                    paramEntry = addRemoveEntry(paramEntry);
+                // create 'none' entry to get an object with array of 'none probetype' entries
+                if (_.isArray(paramEntry)){
+                    paramEntry = {
+                        none: paramEntry
+                    };
+                } else if(!_.isArray(paramEntry) && devProbeType === ''){
+                    paramEntry['none'] = paramEntry['none']? paramEntry['none'] : [];
                 }
+
+                paramEntry.none = addRemoveEntry(paramEntry.none);
+            }
+
+            // delete 'none' entry if it exists as a single entry
+            if (!_.isArray(paramEntry) && Object.keys(paramEntry).length === 1 && paramEntry['none']) {
+                paramEntry = paramEntry['none'];
             }
 
             // set namespaces
@@ -1377,7 +1452,8 @@ AutomationController.prototype.getListNamespaces = function (path, namespacesObj
         namespaces = namespacesObj,
         path = path || null,
         pathArr = [],
-        namespacesPath = '';
+        namespacesPath = '',
+        nspc;
 
     this.getNspcDevAll = function(nspcObj) {
         var devicesAll = [],
@@ -1411,6 +1487,8 @@ AutomationController.prototype.getListNamespaces = function (path, namespacesObj
         nspc = namespaces.filter(function (namespace) {
             return namespace.id === pathArr[0];
         })[0];
+
+        //nspc = nspc[0]? nspc[0] : nspc;
 
         // get object/array by path
         if (nspc && pathArr.length > 1) {
@@ -1452,7 +1530,7 @@ AutomationController.prototype.getListNamespaces = function (path, namespacesObj
                 }
             }
         } else {
-            result = nspc && nspc['params'] && nspc['params']? nspc['params'] : nspc;
+            result = nspc && nspc['params']? nspc['params'] : nspc; // if not return undefined
         }        
         
     } else {
@@ -1473,10 +1551,17 @@ AutomationController.prototype.setNamespace = function (id, namespacesArr, data)
         namespace = _.findWhere(namespacesArr, {id : id});
         if (!!namespace) {
             index = namespacesArr.indexOf(namespace);
-            namespacesArr[index].params = data;
-            result = namespacesArr[index];
+            
+            // remove entry if data is empty
+            if (~index && (_.isArray(data) && data.length < 1) || ((!_.isArray(data)) && Object.keys(data).length < 1)) {
+                namespacesArr = namespacesArr.splice(index, 1);
+                result = namespacesArr;
+            } else {
+                namespacesArr[index].params = data;
+                result = namespacesArr[index];
+            }
         }
-    } else {
+    } else if ((_.isArray(data) && data.length > 0) || ((!_.isArray(data)) && Object.keys(data).length > 0)) {
         namespacesArr.push({
             id: id,
             params: data
@@ -1558,119 +1643,125 @@ AutomationController.prototype.replaceNamespaceFilters = function (moduleMeta) {
             if ((i === 'properties' || i === 'fields') && typeof obj[i] === 'object' && obj[i]['room'] && obj[i]['devicesByRoom']) {
                 var k = _.keys(obj[i])
                     newObj = {};
-                // overwrite old key with new namespaces array
-                if (i === 'properties') {
-                    console.log('do special stuff for properties ...');
 
-                    var dSRoom = _.extend({
-                            "type":"",
-                            "field":"",
-                            "datasource":"",
-                            "enum":"",
-                            "title":""
-                        }, obj[i]['room']),
-                        dSDevByRoom = _.extend({
-                            "type":"",
-                            "datasource":"",
-                            "enum":"",
-                            "title":"",
-                            "dependencies":""
-                        }, obj[i]['devicesByRoom']);
+                try {
+                    // overwrite old key with new namespaces array
+                    if (i === 'properties') {
+                        console.log("Room - Device relation found, try to preparate JSON's schema structure ...");
 
-                    if (dSRoom['enum'] && !_.isArray(dSRoom['enum'])){
-                        dSRoom['enum'] = getNspcFromFilters(moduleMeta, dSRoom['enum']);
+                        var dSRoom = _.extend({
+                                "type":"",
+                                "field":"",
+                                "datasource":"",
+                                "enum":"",
+                                "title":""
+                            }, obj[i]['room']),
+                            dSDevByRoom = _.extend({
+                                "type":"",
+                                "datasource":"",
+                                "enum":"",
+                                "title":"",
+                                "dependencies":""
+                            }, obj[i]['devicesByRoom']);
 
-                        obj[i]['room'] = dSRoom;
-                    }
+                        if (dSRoom['enum'] && !_.isArray(dSRoom['enum'])){
+                            dSRoom['enum'] = getNspcFromFilters(moduleMeta, dSRoom['enum']);
 
-                    if (dSDevByRoom['enum'] && !_.isArray(dSDevByRoom['enum']) && _.isArray(dSRoom['enum'])){
-                        var path = dSDevByRoom['enum'].substring(21).replace(/:/gi, '.');
-                        if(k.length > 0) {
-                            k.forEach(function(key) {
-                                if(key === 'devicesByRoom') {
-                                    dSRoom['enum'].forEach(function(roomId, index) {
-                                        var cnt = index + 1,
-                                            locNspc = [],
-                                            nspc =[];
-
-                                        location = self.getLocation(self.locations, roomId);
-
-                                        if (!!location) {
-                                            nspc = self.getListNamespaces(path, location.namespaces);
-                                        }
-
-                                        dSDevByRoom['enum'] = nspc.length > 0? nspc: [langFile.no_devices_found];
-                                        dSDevByRoom['dependencies'] = "room";
-
-                                        newObj['devicesByRoom_' + cnt] = _.clone(dSDevByRoom);
-                                        if (newObj['devicesByRoom_' + cnt]['title']) {
-                                            newObj['devicesByRoom_' + cnt]['title'] = newObj['devicesByRoom_' + cnt]['title'] + '_' + cnt;
-                                        }
-                                    });
-                                } else {
-                                    newObj[key] = obj[i][key];
-                                }
-                            });
+                            obj[i]['room'] = dSRoom;
                         }
 
-                        obj[i] = newObj;
-                    }
-                } else {
-                    console.log('do special stuff for fields ...');
+                        if (dSDevByRoom['enum'] && !_.isArray(dSDevByRoom['enum']) && _.isArray(dSRoom['enum'])){
+                            var path = dSDevByRoom['enum'].substring(21).replace(/:/gi, '.');
+                            if(k.length > 0) {
+                                k.forEach(function(key) {
+                                    if(key === 'devicesByRoom') {
+                                        dSRoom['enum'].forEach(function(roomId, index) {
+                                            var locNspc = [],
+                                                nspc =[];
 
-                    var dSRoom = _.extend({
-                            "type":"",
-                            "field":"",
-                            "optionLabels":""
-                        },obj[i]['room']),
-                        dSDevByRoom = _.extend({
-                            "dependencies": {},
-                            "type":"",
-                            "field":"",
-                            "optionLabels":""
-                        },obj[i]['devicesByRoom']);
+                                            location = self.getLocation(self.locations, roomId);
 
-                    if (dSRoom['optionLabels'] && !_.isArray(dSRoom['optionLabels'])){
-                        dSRoom['optionLabels'] = getNspcFromFilters(moduleMeta, dSRoom['optionLabels']);
+                                            if (!!location) {
+                                                nspc = self.getListNamespaces(path, location.namespaces);
+                                            }
 
-                        obj[i]['room'] = dSRoom;
-                    }
+                                            dSDevByRoom['enum'] = nspc && nspc.length > 0? nspc: [langFile.no_devices_found];
+                                            dSDevByRoom['dependencies'] = "room";
 
-                    if (dSDevByRoom['optionLabels'] && !_.isArray(dSDevByRoom['optionLabels']) && _.isArray(dSRoom['optionLabels'])){
-                        var path = dSDevByRoom['optionLabels'].substring(21).replace(/:/gi, '.');
-                        if(k.length > 0) {
-                            k.forEach(function(key) {
-                                if(key === 'devicesByRoom') {
-                                    dSRoom['optionLabels'].forEach(function(roomName, index) {
+                                            newObj['devicesByRoom_' + roomId] = _.clone(dSDevByRoom);
+                                            if (newObj['devicesByRoom_' + roomId]['title']) {
+                                                newObj['devicesByRoom_' + roomId]['title'] = newObj['devicesByRoom_' + roomId]['title'] + '_' + roomId;
+                                            }
+                                        });
+                                    } else {
+                                        newObj[key] = obj[i][key];
+                                    }
+                                });
+                            }
 
-                                
-                                        var cnt = index + 1,
-                                            locNspc = [],
-                                            nspc = [];
+                            obj[i] = newObj;
+                        }
+                    } else {
+                        console.log("Room - Device relation found, try to preparate JSON's options structure ...");
 
-                                        location = self.locations.filter(function(location){ return location.title === roomName });
+                        var dSRoom = _.extend({
+                                "type":"",
+                                "field":"",
+                                "optionLabels":""
+                            },obj[i]['room']),
+                            dSDevByRoom = _.extend({
+                                "dependencies": {},
+                                "type":"",
+                                "field":"",
+                                "optionLabels":""
+                            },obj[i]['devicesByRoom']);
 
-                                        if (location[0]) {
-                                            nspc = self.getListNamespaces(path, location[0].namespaces);
-                                        }
-                                        
-                                        dSDevByRoom['optionLabels'] = nspc.length > 0? nspc: [langFile.no_devices_found];
-                                        dSDevByRoom['dependencies'] = { "room" : location[0].id };
+                        if (dSRoom['optionLabels'] && !_.isArray(dSRoom['optionLabels'])){
+                            dSRoom['optionLabels'] = getNspcFromFilters(moduleMeta, dSRoom['optionLabels']);
 
-                                        newObj['devicesByRoom_' + cnt] = _.clone(dSDevByRoom);
-
-                                        if (newObj['devicesByRoom_' + cnt]['label']) {
-                                            newObj['devicesByRoom_' + cnt]['label'] = newObj['devicesByRoom_' + cnt]['label'] + '_' + cnt;
-                                        }
-                                    });
-                                } else {
-                                    newObj[key] = obj[i][key];
-                                }
-                            });
+                            obj[i]['room'] = dSRoom;
                         }
 
-                        obj[i] = newObj;
+                        if (dSDevByRoom['optionLabels'] && !_.isArray(dSDevByRoom['optionLabels']) && _.isArray(dSRoom['optionLabels'])){
+                            var path = dSDevByRoom['optionLabels'].substring(21).replace(/:/gi, '.');
+                            if(k.length > 0) {
+                                k.forEach(function(key) {
+                                    if(key === 'devicesByRoom') {
+                                        dSRoom['optionLabels'].forEach(function(roomName, index) {
+                                    
+                                            var locNspc = [],
+                                                nspc = [],
+                                                locationId;
+
+                                            location = self.locations.filter(function(location){ return location.title === roomName });
+                                            locationId = location[0]? location[0].id : location.id;
+
+                                            if (location[0]) {
+                                                nspc = self.getListNamespaces(path, location[0].namespaces);
+                                            }
+                                            
+                                            dSDevByRoom['optionLabels'] = nspc && nspc.length > 0? nspc: [langFile.no_devices_found];
+                                            dSDevByRoom['dependencies'] = { "room" : locationId };
+
+                                            newObj['devicesByRoom_' + locationId] = _.clone(dSDevByRoom);
+
+                                            if (newObj['devicesByRoom_' + locationId]['label']) {
+                                                newObj['devicesByRoom_' + locationId]['label'] = newObj['devicesByRoom_' + locationId]['label'] + '_' + locationId;
+                                            }
+                                        });
+                                    } else {
+                                        newObj[key] = obj[i][key];
+                                    }
+                                });
+                            }
+
+                            obj[i] = newObj;
+                        }
                     }
+
+                } catch (e) {
+                    console.log('Cannot prepare Room-Device related JSON structure. ERROR: ' + e);
+                    self.addNotification('warning', langFile.err_preparing_room_dev_structure, 'module', moduleMeta.id);
                 }
                 
                 // try to replace the other stuff
@@ -1697,85 +1788,86 @@ AutomationController.prototype.replaceNamespaceFilters = function (moduleMeta) {
         var namespaces = [],
             filters = nspcfilters.split(','),
             apis = ['locations','namespaces','loadFunction'],
-            filteredDev = []
-            nspc;
-        
-        if (!_.isArray(filters)) {
-            return false;
-        }
+            filteredDev = [];
 
-        // do it for each filter
-        _.forEach(filters, function (flr,i){
-            var id = flr.split(':'),
-                path;
+        try {
 
-            if(apis.indexOf(id[0]) > -1){
-                
-                // get location ids or titles - except location 0/globalRoom - 'locations:id' or 'locations:title'
-                // should allow dynamic filtering per location
-                if (id[0] === 'locations' && (id[1] === 'id' || id[1] === 'title')) {
-                    namespaces = _.filter(self.locations, function(location) {
-                        return location[id[1]] !== 0 && location[id[1]] !== 'globalRoom';
-                    }).map(function(location) { 
-                            return location[id[1]];
-                    });
-                
-                // get namespaces of devices per location - 'locations:locationId:filterPath'                   
-                } else if (id[0] === 'locations' && id[1] === 'locationId'){
-                    // don't replace set filters instead
-                    namespaces = nspcfilters;
+            if (!_.isArray(filters)) {
+                return false;
+            }
 
-                // load function from file
-                } else if (id[0] === 'loadFunction') {
-                    var filePath = moduleMeta.location + '/htdocs/js/' + id[1],
-                        jsFile = fs.stat(filePath);
+            // do it for each filter
+            _.forEach(filters, function (flr,i){
+                var id = flr.split(':'),
+                    path;
+
+                if(apis.indexOf(id[0]) > -1){
                     
-                    if (id[1] && jsFile && jsFile.type === 'file') {
-                        jsFile = fs.load(filePath);
+                    // get location ids or titles - except location 0/globalRoom - 'locations:id' or 'locations:title'
+                    // should allow dynamic filtering per location
+                    if (id[0] === 'locations' && (id[1] === 'id' || id[1] === 'title')) {
+                        namespaces = _.filter(self.locations, function(location) {
+                            return location[id[1]] !== 0 && location[id[1]] !== 'globalRoom';
+                        }).map(function(location) { 
+                                return location[id[1]];
+                        });
+                    
+                    // get namespaces of devices per location - 'locations:locationId:filterPath'                   
+                    } else if (id[0] === 'locations' && id[1] === 'locationId'){
+                        // don't replace set filters instead
+                        namespaces = nspcfilters;
 
-                        if (!!jsFile) {
-                           //compress string 
-                           namespaces = jsFile.replace(/\s\s+|\t/g,' ');
+                    // load function from file
+                    } else if (id[0] === 'loadFunction') {
+                        var filePath = moduleMeta.location + '/htdocs/js/' + id[1],
+                            jsFile = fs.stat(filePath);
+                        
+                        if (id[1] && jsFile && jsFile.type === 'file') {
+                            jsFile = fs.load(filePath);
+
+                            if (!!jsFile) {
+                               //compress string 
+                               namespaces = jsFile.replace(/\s\s+|\t/g,' ');
+                            }
+                        }
+                    
+                    // get namespaces of devices ignoring locations
+                    } else {
+                        // cut path
+                        path = flr.substring(id[0].length + 1).replace(/:/gi, '.');
+
+                        // get namespaces
+                        nspc = self.getListNamespaces(path, self.namespaces);
+                        if (nspc) {
+                            namespaces = namespaces.concat(nspc);
                         }
                     }
-                
-                // get namespaces of devices ignoring locations
-                } else {
-                    // cut path
-                    path = flr.substring(id[0].length + 1).replace(/:/gi, '.');
-
-                    // get namespaces
-                    //self.generateNamespaces();
-                    nspc = self.getListNamespaces(path, self.namespaces);
-                    if (nspc) {
-                        namespaces = namespaces.concat(nspc);
-                    }
                 }
-            }
-        });
+            });
+            return namespaces;
 
-        return namespaces;
+        } catch (e) {
+            console.log('Cannot parse filters > ' + nspcfilters + ' < from namespaces. ERROR: ' + e);
+            self.addNotification('warning', langFile.err_parsing_npc_filters, 'module', moduleMeta.id);
+            
+            return namespaces;
+        }
     };
 
     if (!!moduleMeta) {
-        try {
-            var params = {
-                    schema: ['enum'],
-                    options: ['optionLabels', 'onFieldChange', 'click'],
-                    postRender : ''
-                };
-            
-            // transform filters
-            for (var property in params) {
-                if (property === 'postRender' && moduleMeta[property] && !_.isArray(moduleMeta[property])) {                           
-                    moduleMeta[property] = getNspcFromFilters(moduleMeta, moduleMeta[property]);
-                } else if (moduleMeta[property]) {                           
-                    moduleMeta[property] = replaceNspcFilters(moduleMeta, moduleMeta[property], params[property]);
-                }
+        var params = {
+                schema: ['enum'],
+                options: ['optionLabels', 'onFieldChange', 'click'],
+                postRender : ''
+            };
+        
+        // transform filters
+        for (var property in params) {
+            if (property === 'postRender' && moduleMeta[property] && !_.isArray(moduleMeta[property])) {                           
+                moduleMeta[property] = getNspcFromFilters(moduleMeta, moduleMeta[property]);
+            } else if (moduleMeta[property]) {                           
+                moduleMeta[property] = replaceNspcFilters(moduleMeta, moduleMeta[property], params[property]);
             }
-     
-        } catch (e) {
-            console.log('Cannot transform filters from module ' + moduleMeta.id + '. ERROR: ' + e);
         }
     }
 
@@ -1784,13 +1876,11 @@ AutomationController.prototype.replaceNamespaceFilters = function (moduleMeta) {
 
 // load module lang folder
 AutomationController.prototype.loadModuleLang = function (moduleId) {
-    var self = this,
-        languageFile;
+    var moduleMeta = this.modules[moduleId] && this.modules[moduleId].meta || null,
+        languageFile = null;
 
-        languageFile = self.loadMainLang('modules/' + moduleId + '/');
-
-        if(languageFile === null){
-            languageFile = self.loadMainLang('userModules/' + moduleId + '/');
+        if(!!moduleMeta){
+            languageFile = this.loadMainLang(moduleMeta.location + '/');
         }
 
     return languageFile;
@@ -1799,7 +1889,7 @@ AutomationController.prototype.loadModuleLang = function (moduleId) {
 // load lang folder with given prefix
 AutomationController.prototype.loadMainLang = function (pathPrefix) {
     var self = this,
-        languageFile,
+        languageFile = null,
         prefix;
 
     if(pathPrefix === undefined || pathPrefix === null) {
