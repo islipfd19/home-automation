@@ -32,7 +32,7 @@ function AutomationController() {
     this.instances = config.instances;
     this.locations = config.locations || [];
     this.vdevInfo = config.vdevInfo || {};
-    this.modules_categories = config.modules_categories || [];
+    this.modules_categories = fs.loadJSON('modulesCategories.json') || [];
     this.namespaces = namespaces || [];
     this.registerInstances = {};
     this.files = files || {};
@@ -166,8 +166,7 @@ AutomationController.prototype.saveConfig = function () {
         "vdevInfo": this.vdevInfo,
         "locations": cleanupLocations(this.locations),
         "profiles": this.profiles,
-        "instances": this.instances,
-        "modules_categories": this.modules_categories
+        "instances": this.instances
     };
 
     try {
@@ -181,14 +180,14 @@ AutomationController.prototype.saveFiles = function () {
     saveObject("files.json", this.files);
 };
 
-AutomationController.prototype.start = function (restore) {
+AutomationController.prototype.start = function (reload) {
     var restore = restore || false;
 
-    // if restore flag is true, overwrite config values first
-    if (restore){
-        console.log("Restore config...");
-        // Restore config
-        this.restoreConfig();
+    // if reload flag is true, overwrite config values first
+    if (reload){
+        console.log("Reload config...");
+        // Reload config
+        this.reloadConfig();
     }
 
     // Restore persistent data
@@ -217,16 +216,15 @@ AutomationController.prototype.start = function (restore) {
     this.emit("core.start");
 };
 
-AutomationController.prototype.restoreConfig = function () {    
-    var restoredConfig = loadObject("config.json");
+AutomationController.prototype.reloadConfig = function () {    
+    var reloadedConfig = loadObject("config.json");
 
     // overwrite variables with restored data
-    this.config = restoredConfig.controller || config.controller;
-    this.profiles = restoredConfig.profiles || config.profiles;
-    this.instances = restoredConfig.instances || config.instances;
-    this.locations = restoredConfig.locations || config.locations;
-    this.vdevInfo = restoredConfig.vdevInfo || config.vdevInfo;
-    this.modules_categories = restoredConfig.modules_categories || config.modules_categories;
+    this.config = reloadedConfig.controller || config.controller;
+    this.profiles = reloadedConfig.profiles || config.profiles;
+    this.instances = reloadedConfig.instances || config.instances;
+    this.locations = reloadedConfig.locations || config.locations;
+    this.vdevInfo = reloadedConfig.vdevInfo || config.vdevInfo;
 };
 
 AutomationController.prototype.stop = function () {
@@ -297,10 +295,12 @@ AutomationController.prototype.loadModules = function (callback) {
     }
 };
 
-AutomationController.prototype.loadModuleFromFolder = function (moduleClassName, folder) {
+AutomationController.prototype.loadModuleFromFolder = function (moduleClassName, folder, ignoreVersion) {
     var self = this,
         langFile = self.loadMainLang(),
-        values;
+        values, 
+        addModule = false,
+        ignoreVersion = ignoreVersion? ignoreVersion : false;
 
     var moduleMetaFilename = folder + moduleClassName + "/module.json",
         _st;
@@ -338,11 +338,36 @@ AutomationController.prototype.loadModuleFromFolder = function (moduleClassName,
     moduleMeta.id = moduleClassName;
     moduleMeta.location = folder + moduleClassName;
 
-    // Grab _module and clear it out
-    self.modules[moduleClassName] = {
-        meta: moduleMeta,
-        location: folder + moduleClassName
-    };
+    // check version before overwriting the already existing module
+    if (self.modules[moduleClassName] && 
+            self.modules[moduleClassName].meta && 
+                self.modules[moduleClassName].meta.version && 
+                    moduleMeta.version) {
+        
+        var existingVersion = self.modules[moduleClassName].meta.version.toString(),
+            currentVersion = moduleMeta.version.toString();
+
+        if (existingVersion.localeCompare(currentVersion) === 0 || ignoreVersion) {
+            addModule = true;
+        } else {
+            addModule = has_higher_version(currentVersion, existingVersion);
+        }
+
+    } else {
+        addModule = true;
+    }
+
+    if (addModule) {
+        // Grab _module and clear it out
+        self.modules[moduleClassName] = {
+            meta: moduleMeta,
+            location: folder + moduleClassName
+        };
+    } else {
+        console.log('Lower version detected, ignoring ...');
+    }
+
+    return addModule;
 };
 
 
@@ -389,6 +414,16 @@ AutomationController.prototype.instantiateModule = function (instanceModel) {
         try {
             instance.init(instanceModel.params);
         } catch (e) {
+
+            // remove singleton entry of broken instance
+            if (module.meta.singleton) {
+                var index = self._loadedSingletons.indexOf(module.meta.id);
+                
+                if(index > -1) {
+                    self._loadedSingletons.splice(index, 1);
+                }
+            }
+
             values = ((module && module.meta) ? module.meta.id : instanceModel.moduleId) + ": " + e.toString();
 
             self.addNotification("error", langFile.ac_err_init_module + values, "core", "AutomationController");
@@ -527,16 +562,95 @@ AutomationController.prototype.unloadModule = function (moduleId) {
     return result;
 };
 
-AutomationController.prototype.loadInstalledModule = function (moduleId, rootDirectory) {
+AutomationController.prototype.installModule = function(moduleUrl, moduleName) {
+    var result = "in progress";
+
+    console.log('Installing app', moduleName, '...');
+
+    if (moduleUrl) {
+        installer.install(
+            moduleUrl,
+            moduleName,
+            function() {
+                    result = "done";
+            },  function() {
+                    result = "failed";
+            }
+        );
+        
+        var d = (new Date()).valueOf() + 20000; // wait not more than 20 seconds
+        
+        while ((new Date()).valueOf() < d &&  result === "in progress") {
+                processPendingCallbacks();
+        }
+
+        if (result === "in progress") {
+                result = "failed";
+        }
+    }
+
+    return result;
+};
+
+AutomationController.prototype.uninstallModule = function(moduleId, reset) {
+    var langFile = this.loadMainLang(),
+        uninstall = false,
+        reset = reset? reset : false,
+        unload = this.unloadModule(moduleId),
+        result = "in progress";
+
+    if (unload === 'success') {
+        try {
+            installer.remove(
+                moduleId,
+                function() {
+                        result = "done";
+                },  function() {
+                        result = "failed";
+                }
+            );
+            
+            var d = (new Date()).valueOf() + 20000; // wait not more than 20 seconds
+            
+            while ((new Date()).valueOf() < d &&  result === "in progress") {
+                    processPendingCallbacks();
+            }
+            
+            if (result === "in progress") {
+                    result = "failed";
+            }
+
+            if (result === "done") {
+
+                if(reset) {
+                    loadSuccessfully = this.loadInstalledModule(moduleId, 'modules/', true);
+
+                    uninstall = loadSuccessfully;
+                } else {
+                    uninstall = true;
+                }                
+                
+            }
+        } catch (e) {
+            console.log('Uninstalling or reseting of app "' + moduleId + '" has failed. ERROR:', e);
+            this.addNotification("error", langFile.ac_err_uninstall_mod + ': ' + moduleId, "core", "AutomationController");
+        }
+    }
+
+    return uninstall;
+};
+
+AutomationController.prototype.loadInstalledModule = function (moduleId, rootDirectory, ignoreVersion) {
     var self = this,
-        successful = false;
+        successful = false,
+        ignoreVersion = ignoreVersion? ignoreVersion : false;
 
     try{
         if(fs.list(rootDirectory + moduleId) && fs.list(rootDirectory + moduleId).indexOf('index.js') !== -1){
             console.log('Load app "' + moduleId + '" from folder ...');
-            self.loadModuleFromFolder(moduleId, rootDirectory);
+            successful = self.loadModuleFromFolder(moduleId, rootDirectory, ignoreVersion);
 
-            if(self.modules[moduleId]){
+            if(successful && self.modules[moduleId]){
                 self.loadModule(self.modules[moduleId]);
 
                 successful = true;
@@ -549,48 +663,42 @@ AutomationController.prototype.loadInstalledModule = function (moduleId, rootDir
     return successful;
 };
 
-AutomationController.prototype.reinitializeModule = function (moduleId, rootDirectory) {
+AutomationController.prototype.reinitializeModule = function (moduleId, rootDirectory, ignoreVersion) {
     var self = this,
         successful = false,
-        activeInstances = [];
+        existingInstances = [],
+        ignoreVersion = ignoreVersion? ignoreVersion : false;
 
     // filter for active instances of moduleId
-    activeInstances = self.instances.filter(function (instance) {
-        return instance.moduleId === moduleId &&
-                (instance.active === true ||
-                    instance.active === 'true');
+    existingInstances = self.instances.filter(function (instance) {
+        return instance.moduleId === moduleId;
     });
 
-    // stopp all active instances of moduleId
-    if (activeInstances.length > 0) {
-        activeInstances.forEach(function (instance) {
-            instance.active = false;
-            self.reconfigureInstance(instance.id, instance);
-        });
-    }
+    // remove all active instances of moduleId
+    existingInstances.forEach(function (instance) {
+        self.deleteInstance(instance.id);
+    });
 
     // try to reinitialize app
     try{
         if(fs.list(rootDirectory + moduleId) && fs.list(rootDirectory + moduleId).indexOf('index.js') !== -1){
             console.log('Load app "' + moduleId + '" from folder ...');
-            self.loadModuleFromFolder(moduleId, rootDirectory);
+            successful = self.loadModuleFromFolder(moduleId, rootDirectory, ignoreVersion);
 
-            if(self.modules[moduleId]){
+            if(successful && self.modules[moduleId]){
+
                 self.loadModule(self.modules[moduleId]);
+
+                // add and start instances of moduleId again
+                existingInstances.forEach(function (instance) {
+                    self.createInstance(instance);
+                });
 
                 successful = true;
             }
         }
     } catch (e){
         console.log('Load app "' + moduleId + '" has failed. ERROR:', e);
-    }
-
-    // start instances of moduleId again
-    if (activeInstances.length > 0) {
-        activeInstances.forEach(function (instance) {
-            instance.active = true;
-            self.reconfigureInstance(instance.id, instance);
-        });
     }
 
     return successful;
@@ -598,12 +706,56 @@ AutomationController.prototype.reinitializeModule = function (moduleId, rootDire
 
 AutomationController.prototype.instantiateModules = function () {
     var self = this,
-        module;
+        modules = Object.getOwnPropertyNames(this.modules),
+        requiredBaseModules = ["ZWave"],
+        requiredWithDep = [];
 
     this.loadedModules = [];
 
+    modules.splice(modules.indexOf('ZWave'), 1);
+
+    // get all required modules from dependencies
     Object.getOwnPropertyNames(this.modules).forEach(function (m) {
-        this.loadModule(this.modules[m]);
+        if (this.modules[m].meta && 
+                this.modules[m].meta.dependencies &&
+                    _.isArray(this.modules[m].meta.dependencies) && 
+                        this.modules[m].meta.dependencies.length > 0) {
+
+            requiredBaseModules = _.uniq(requiredBaseModules.concat(this.modules[m].meta.dependencies));
+
+            // remove all required base modules from modules list
+            this.modules[m].meta.dependencies.forEach(function(mod){
+                if (modules.indexOf(mod) > -1) {
+                    modules.splice(modules.indexOf(mod), 1);
+                }
+            });
+        }
+    }, this);
+
+    // first instantiate all required modules without dependencies
+    requiredBaseModules.forEach(function(mod) {
+        if (this.modules[mod].meta && 
+                this.modules[mod].meta.dependencies &&
+                    _.isArray(this.modules[mod].meta.dependencies) && 
+                        this.modules[mod].meta.dependencies.length > 0) {
+            
+            // cache required modules with dependencies
+            if (requiredWithDep.indexOf(mod) < 0){
+                requiredWithDep.push(mod);
+            }
+        } else {
+            this.loadModule(this.modules[mod]);
+        }
+    }, this);
+
+    // instantiate all required with dependencies
+    requiredWithDep.forEach(function(mod) {
+        this.loadModule(this.modules[mod]);
+    }, this);
+
+    // load all remaining modules
+    modules.forEach(function(mod) {
+        this.loadModule(this.modules[mod]);
     }, this);
 };
 
@@ -612,7 +764,8 @@ AutomationController.prototype.moduleInstance = function (instanceId) {
 };
 
 AutomationController.prototype.registerInstance = function (instance) {
-    var self = this;
+    var self = this,
+        langFile = this.loadMainLang();
 
     if (!!instance) {
         var instanceId = instance.id,
@@ -622,10 +775,10 @@ AutomationController.prototype.registerInstance = function (instance) {
             self.registerInstances[instanceId] = instance;
             self.emit('core.instanceRegistered', instanceId);
         } else {
-            self.emit('core.error', new Error("Can't register duplicate module instance " + instanceId));
+            self.emit('core.error', new Error(langFile.ac_err_instance_already_exists + instanceId));
         }
     } else {
-        self.emit('core.error', new Error("Can't register empty module instance " + instance.id));
+        self.emit('core.error', new Error(langFile.ac_err_instance_empty + instance.id));
     }
 };
 
@@ -653,25 +806,42 @@ AutomationController.prototype.listInstances = function (){
 AutomationController.prototype.createInstance = function (reqObj) {
     //var instance = this.instantiateModule(id, className, config),
     var self = this,
+        langFile = this.loadMainLang(),
         id = self.instances.length ? self.instances[self.instances.length - 1].id + 1 : 1,
         instance = null,
         module = _.find(self.modules, function (module) {
             return module.meta.id === reqObj.moduleId;
         }),
-        result;
+        result,
+        alreadyExisting = [];
 
     if (!!module) {
+
+        if (reqObj.id) {
+            alreadyExisting = _.filter(this.instances, function(inst){
+                return inst.id === reqObj.id
+            });
+        }
+
         instance = _.extend(reqObj, { 
-            id: id
+            id: alreadyExisting[0]? alreadyExisting[0].id : id
         });
 
         self.instances.push(instance);
         self.saveConfig();
         self.emit('core.instanceCreated', id);
-        self.instantiateModule(instance);
-        result = instance;
+        result = self.instantiateModule(instance);
+
+        // remove instance from list if broken
+        if (result === null) {
+            var currIndex = self.instances.length ? self.instances.length - 1 : 0;
+            
+            self.instances.splice(currIndex, 1);
+            self.saveConfig();
+            self.emit('core.instanceDeleted', id);
+        }        
     } else {
-        self.emit('core.error', new Error("Cannot create module " + reqObj.moduleId + " instance with id " + id));
+        self.emit('core.error', new Error(langFile.ac_err_create_instance + reqObj.moduleId + " :: " + id));
         result = false;
     }
 
@@ -721,7 +891,8 @@ AutomationController.prototype.stopInstance = function (instance) {
 };
 
 AutomationController.prototype.reconfigureInstance = function (id, instanceObject) {
-    var register_instance = this.registerInstances[id],
+    var langFile = this.loadMainLang(),
+        register_instance = this.registerInstances[id],
         instance = _.find(this.instances, function (model) {
             return model.id === id;
         }),
@@ -768,7 +939,7 @@ AutomationController.prototype.reconfigureInstance = function (id, instanceObjec
         this.emit('core.instanceReconfigured', id)
     } else {
         result = null;
-        this.emit('core.error', new Error("Cannot reconfigure instance with id " + id));
+        this.emit('core.error', new Error(langFile.ac_err_refonfigure_instance + id));
     }
 
     this.saveConfig();
@@ -783,15 +954,6 @@ AutomationController.prototype.removeInstance = function (id) {
 
     if (!!instance) {
         this.stopInstance(instance);
-
-        if (instance.meta.singleton) {
-            var pos = this._loadedSingletons.indexOf(instanceClass);
-            if (pos >= 0) {
-                this._loadedSingletons.splice(pos, 1);
-            }
-        }
-
-        delete this.registerInstances[id];
         this.emit('core.instanceStopped', id);
         this.saveConfig();
     }
@@ -970,8 +1132,9 @@ AutomationController.prototype.addLocation = function (locProps, callback) {
 };
 
 AutomationController.prototype.removeLocation = function (id, callback) {
-    var self = this;
-    var locations = this.locations.filter(function (location) {
+    var self = this,
+        langFile = this.loadMainLang(),
+        locations = this.locations.filter(function (location) {
         return location.id === id;
     });
     if (locations.length > 0) {
@@ -995,14 +1158,16 @@ AutomationController.prototype.removeLocation = function (id, callback) {
         if (typeof callback === 'function') {
             callback(false);
         }
-        this.emit('core.error', new Error("Cannot remove location " + id + " - doesn't exist"));
+        this.emit('core.error', new Error(langFile.ac_err_location_not_found));
     }
 };
 
 AutomationController.prototype.updateLocation = function (id, title, user_img, default_img, img_type, callback) {
-    var locations = this.locations.filter(function (location) {
-        return location.id === id;
-    });
+    var langFile = this.loadMainLang(),
+        locations = this.locations.filter(function (location) {
+            return location.id === id;
+        });
+
     if (locations.length > 0) {
         location = this.locations[this.locations.indexOf(locations[0])];
 
@@ -1026,7 +1191,7 @@ AutomationController.prototype.updateLocation = function (id, title, user_img, d
         if (typeof callback === 'function') {
             callback(false);
         }
-        this.emit('core.error', new Error("Cannot update location " + id + " - doesn't exist"));
+        this.emit('core.error', new Error(langFile.ac_err_location_not_found));
     }
 };
 
@@ -1074,6 +1239,41 @@ AutomationController.prototype.listHistories = function () {
     return self.history;
 };
 
+AutomationController.prototype.deleteDevHistory = function (vDevId) {
+    var self = this,
+        vDevId = vDevId || null;
+        success = false;
+        
+        if (!!vDevId) {
+            //clear entries of single vDev
+            index = _.findIndex(self.history, { id: vDevId });
+
+            if (index > -1) {
+                self.history[index].mH = [];
+
+                success = true;
+
+                console.log('History of ' + vDevId + ' successful deleted ...');
+            }
+        } else {
+            //clear all entries
+            self.history.forEach(function (devHist) {
+                devHist.mH = [];
+            });
+
+            success = true;
+
+            console.log('All histories successful deleted ...');
+        }
+
+        //save history
+        if (success) {
+            saveObject('history', self.history);
+        }
+
+    return success;
+};
+
 AutomationController.prototype.getDevHistory = function (dev, since, show) {
     var filteredEntries = [],
         averageEntries = [],
@@ -1113,6 +1313,7 @@ AutomationController.prototype.getDevHistory = function (dev, since, show) {
                     case 'sensorBinary':
                     case 'switchBinary':
                     case 'doorlock':
+                    case 'toggleButton':
                         l = 0 < (l/cnt) && (l/cnt) < 1? 0.5 : (l/cnt); // set 0, 0.5 or 1 if status is binary
                         break;
                     default:
@@ -1176,8 +1377,14 @@ AutomationController.prototype.getProfile = function (id) {
 };
 
 AutomationController.prototype.createProfile = function (profile) {
-    var id = this.profiles.length ? this.profiles[this.profiles.length - 1].id + 1 : 1,
-        globalRoom = [0];
+    var id = 0,
+        globalRoom = [0],
+        profileIds = _.map(this.profiles, function(pro){
+                        return parseInt(pro.id);
+                    });
+
+    // create latest id
+    id = profileIds.length > 0? Math.max.apply(null, profileIds) + 1 : 1;
     
     profile.id = id;
     profile.rooms = profile.rooms.indexOf(0) > -1? profile.rooms : profile.rooms.concat(globalRoom);

@@ -45,6 +45,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
         this.router.get("/logout", this.ROLE.USER, this.doLogout);
         this.router.get("/notifications", this.ROLE.USER, this.exposeNotifications);
         this.router.get("/history", this.ROLE.USER, this.exposeHistory);
+        this.router.del("/history", this.ROLE.USER, this.exposeHistory);
         this.router.get("/devices", this.ROLE.USER, this.listDevices);
         this.router.get("/restart", this.ROLE.ADMIN, this.restartController);
         this.router.get("/locations", this.ROLE.USER, this.listLocations);
@@ -114,6 +115,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
         this.router.get("/namespaces/:namespace_id", this.ROLE.ADMIN, this.getNamespaceFunc);
 
         this.router.get("/history/:dev_id", this.ROLE.USER, this.getDevHist);
+        this.router.del("/history/:dev_id", this.ROLE.USER, this.getDevHist);
 
         this.router.get("/load/modulemedia/:module_name/:file_name", this.ROLE.ANONYMOUS, this.loadModuleMedia);
         
@@ -121,11 +123,11 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
 
         this.router.get("/backup", this.ROLE.ADMIN, this.backup);
         this.router.post("/restore", this.ROLE.ADMIN, this.restore);
-        this.router.post("/reset", this.ROLE.ADMIN, this.reset);
+        this.router.get("/resetToFactoryDefault", this.ROLE.ADMIN, this.resetToFactoryDefault);
         
         this.router.get("/system/webif-access", this.ROLE.ADMIN, this.setWebifAccessTimout);
-        this.router.get("/system/trust-my-network", this.ROLE.ADMIN, this.getTrustMyNetwork);
-        this.router.put("/system/trust-my-network", this.ROLE.ADMIN, this.setTrustMyNetwork);
+        this.router.get("/system/trust-my-network", this.ROLE.ADMIN, this.getTrustMyNetwork); // TODO !! Remove this as it should be stored in the UI, not on the server
+        this.router.put("/system/trust-my-network", this.ROLE.ADMIN, this.setTrustMyNetwork); // TODO !! Remove this as it should be stored in the UI, not on the server
 
         this.router.get("/system/time/get", this.ROLE.ANONYMOUS, this.getTime);        
         this.router.get("/system/remote-id", this.ROLE.ANONYMOUS, this.getRemoteId);
@@ -133,7 +135,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
     },
 
     // Used by the android app to request server status
-   statusReport: function () {
+    statusReport: function () {
         var currentDateTime = new Date(),
             reply = {
                 error: null,
@@ -724,34 +726,18 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
                 },
                 code: 500
             },
-            moduleUrl = this.req.body.moduleUrl;
-            
-        var result = "in progress";
-        var moduleId = moduleUrl.split(/[\/]+/).pop().split(/[.]+/).shift();
+            moduleUrl = typeof this.req.body === 'string'? JSON.parse(this.req.body).moduleUrl : this.req.body.moduleUrl,
+            result = "",
+            moduleId = moduleUrl.split(/[\/]+/).pop().split(/[.]+/).shift();
 
         if (!this.controller.modules[moduleId]) {
-            installer.install(
-                moduleUrl,
-                function() {
-                        result = "done";
-                },  function() {
-                        result = "failed";
-                }
-            );
             
-            var d = (new Date()).valueOf() + 20000; // wait not more than 20 seconds
-            
-            while ((new Date()).valueOf() < d &&  result === "in progress") {
-                    processPendingCallbacks();
-            }
-            
-            if (result === "in progress") {
-                    result = "failed";
-            }
+            // download and install the module
+            result = this.controller.installModule(moduleUrl, moduleId);
 
             if (result === "done") {
                 
-                loadSuccessfully = this.controller.loadInstalledModule(moduleId, 'userModules/');
+                loadSuccessfully = this.controller.loadInstalledModule(moduleId, 'userModules/', false);
 
                 if(loadSuccessfully){
                     reply.code = 201;
@@ -783,30 +769,14 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
                 },
                 code: 500
             },
-            moduleUrl = this.req.body.moduleUrl;
-            
-        var result = "in progress";
-        var moduleId = moduleUrl.split(/[\/]+/).pop().split(/[.]+/).shift();
+            moduleUrl = typeof this.req.body === 'string'? JSON.parse(this.req.body).moduleUrl : this.req.body.moduleUrl,
+            result = "",
+            moduleId = moduleUrl.split(/[\/]+/).pop().split(/[.]+/).shift();
 
         if (this.controller.modules[moduleId]) {
-            installer.install(
-                moduleUrl,
-                function() {
-                        result = "done";
-                },  function() {
-                        result = "failed";
-                }
-            );
-            
-            var d = (new Date()).valueOf() + 20000; // wait not more than 20 seconds
-            
-            while ((new Date()).valueOf() < d &&  result === "in progress") {
-                    processPendingCallbacks();
-            }
-            
-            if (result === "in progress") {
-                    result = "failed";
-            }
+
+            // download and install/overwrite the module
+            result = this.controller.installModule(moduleUrl, moduleId);
 
             if (result === "done") {
 
@@ -833,8 +803,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
     deleteModule: function (moduleId) {
         var reply = {
                 error: {
-                    key: null,
-                    errorMsg: null
+                    key: null
                 },
                 data: {
                     key: null,
@@ -842,52 +811,18 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
                 },
                 code: 500
             }, 
-            unload;
-            
-        var result = "in progress";
+            uninstall = false;
 
         if (this.controller.modules[moduleId]) {
 
-            unload = this.controller.unloadModule(moduleId);
+            uninstall = this.controller.uninstallModule(moduleId);
 
-            if (unload === 'success') {
-                try {
-                    installer.remove(
-                        moduleId,
-                        function() {
-                                result = "done";
-                        },  function() {
-                                result = "failed";
-                        }
-                    );
-                    
-                    var d = (new Date()).valueOf() + 20000; // wait not more than 20 seconds
-                    
-                    while ((new Date()).valueOf() < d &&  result === "in progress") {
-                            processPendingCallbacks();
-                    }
-                    
-                    if (result === "in progress") {
-                            result = "failed";
-                    }
-
-                    if (result === "done") {
-                        
-                        reply.code = 200;
-                        reply.data.key = "app_delete_successful"; // send language key as response
-                    } else {
-                        reply.code = 500;
-                        reply.error.key = 'app_failed_to_delete';
-                    }
-                } catch (e) {
-                    reply.code = 500;
-                    reply.error.key = 'app_failed_to_delete';
-                    reply.error.errorMsg = e;
-                }
+            if (uninstall) {
+                reply.code = 200;
+                reply.data.key = "app_delete_successful"; // send language key as response
             } else {
                 reply.code = 500;
                 reply.error.key = 'app_failed_to_delete';
-                reply.error.errorMsg = unload;
             }       
         } else {
             reply.code = 404;
@@ -909,54 +844,15 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
 
             if (this.controller.modules[moduleId].location === ('userModules/' + moduleId) && fs.list('modules/' + moduleId)){
 
-                unload = this.controller.unloadModule(moduleId);
+                uninstall = this.controller.uninstallModule(moduleId, true);
 
-                if (unload === 'success') {
-                    try {
-                        installer.remove(
-                            moduleId,
-                            function() {
-                                    result = "done";
-                            },  function() {
-                                    result = "failed";
-                            }
-                        );
-                        
-                        var d = (new Date()).valueOf() + 20000; // wait not more than 20 seconds
-                        
-                        while ((new Date()).valueOf() < d &&  result === "in progress") {
-                                processPendingCallbacks();
-                        }
-                        
-                        if (result === "in progress") {
-                                result = "failed";
-                        }
-
-                        if (result === "done") {
-
-                            loadSuccessfully = this.controller.loadInstalledModule(moduleId, 'modules/');
-                            
-                            if(loadSuccessfully) {
-                                reply.code = 200;
-                                reply.data.key = 'app_reset_successful_to_version';
-                                reply.data.appendix = this.controller.modules[moduleId].meta.version; 
-                            } else {
-                                reply.code = 200;
-                                reply.data.key = "app_reset_successful_but_restart_necessary"; // send language key as response
-                            }
-                        } else {
-                            reply.code = 500;
-                            reply.error.key = 'app_failed_to_remove_old';
-                        }
-                    } catch (e) {
-                        reply.code = 500;
-                        reply.error.key = 'app_failed_to_reset';
-                        reply.error.errMsg = e;
-                    }
+                if (uninstall) {
+                    reply.code = 200;
+                    reply.data.key = 'app_reset_successful_to_version';
+                    reply.data.appendix = this.controller.modules[moduleId].meta.version; 
                 } else {
                     reply.code = 500;
-                    reply.error.key = 'app_failed_to_reset';
-                    reply.error.errMsg = unload;
+                    reply.error = 'There was an error during resetting the app ' + moduleId + '. Maybe a server restart could solve this problem.';
                 }       
             } else {
                 reply.code = 412;
@@ -1068,14 +964,26 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
                 data: null,
                 code: 500
             },
-            location = fs.list('userModules/' + moduleId)? 'userModules/' : 'modules/';
+            location = [],
+            loadSuccessfully = 0;
 
-        if (fs.list(location)) {
+        if(fs.list('modules/' + moduleId)) {
+            location.push('modules/');
+        }
+
+        if(fs.list('userModules/' + moduleId)) {
+            location.push('userModules/');
+        }
+
+        if (location.length > 0) {
             try {
-                loadSuccessfully = this.controller.reinitializeModule(moduleId, location);
+
+                _.forEach(location, function(loc) {
+                    loadSuccessfully += this.controller.reinitializeModule(moduleId, loc);
+                });
                 
-                if(loadSuccessfully){
-                    reply.data = 'Reinitialization of app "' + moduleId + '" successfull.',
+                if(loadSuccessfully > 0){
+                    reply.data = 'Reinitialization of app "' + moduleId + '" successfull.';
                     reply.code = 200;
                 }
             } catch (e) {
@@ -1117,7 +1025,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
 
         if (this.controller.modules.hasOwnProperty(reqObj.moduleId)) {
             instance = this.controller.createInstance(reqObj);
-            if (instance) {
+            if (!!instance && instance) {
                 reply.code = 201;
                 reply.data = instance;
             } else {
@@ -1215,7 +1123,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
             } else {
                 getProfile = this.controller.getProfile(this.req.user);
                 if (getProfile && this.req.user === getProfile.id) {
-                    profiles = [profile];
+                    profiles = [getProfile];
                 }
             }
             if (!Array.isArray(profiles)) {
@@ -1299,6 +1207,9 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
                 hide_system_events: false,
                 hide_single_device_events: []
             });
+
+            reqObj = _.omit(reqObj, 'passwordConfirm');
+            
             profile = this.controller.createProfile(reqObj);
             if (profile !== undefined && profile.id !== undefined) {
                 reply.data = resProfile;
@@ -1595,6 +1506,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
     exposeHistory: function () {
         var history,
             reply = {
+                code: 500,
                 error: null,
                 data: null
             };
@@ -1602,12 +1514,25 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
         history = this.controller.listHistories();
 
         if(history){
-            reply.data = {
-                updateTime: Math.floor(new Date().getTime() / 1000),
-                history: history
-            };
-            reply.code = 200;
-            
+            if (this.req.method === "GET") {
+                reply.data = {
+                    updateTime: Math.floor(new Date().getTime() / 1000),
+                    history: history
+                };
+                reply.code = 200;
+
+            } else if (this.req.method === "DELETE") {
+                success = this.controller.deleteDevHistory();
+
+                if (success) {
+                    reply.code = 204;
+                } else {
+                    reply.error = "Something went wrong."
+                }
+            } else {
+                reply.code = 400;
+                reply.error = "Bad request."; 
+            }
         } else {
             reply.code = 404;
             reply.error = "No device histories found.";
@@ -1615,12 +1540,14 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
             
         return reply;
     },
+    // get or delete histories of devices
     getDevHist: function (vDevId) {
         var history,
             dev,
             reply = {
+                code: 500,
                 error: null,
-                data: null
+                    data: null
             },
             since,
             show,
@@ -1628,29 +1555,46 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
             view = [288,96,48,24,12,6];
 
         if (this.deviceByUser(vDevId, this.req.user) !== null) {
-            show = this.req.query.hasOwnProperty("show")? (view.indexOf(parseInt(this.req.query.show, 10)) > -1 ? parseInt(this.req.query.show, 10) : 0) : 0;
-            since = this.req.query.hasOwnProperty("since") ? parseInt(this.req.query.since, 10) : 0;
-            history = this.controller.listHistories();
-            hash = this.controller.hashCode(vDevId);
 
+            history = this.controller.listHistories();
+            
             if (history) {
+
+                hash = this.controller.hashCode(vDevId);
                 dev = history.filter(function(x) {
-                    return x.h === hash;
+                    return x.h === hash || x.id === vDevId;
                 });
-                
+
                 if (dev.length > 0) {
-                    sinceDevHist = this.controller.getDevHistory(dev, since, show);            
-                    
-                    if (dev && sinceDevHist) {
-                        reply.code = 200;
-                        reply.data = {
+                    if (this.req.method === "GET") {
+                        show = this.req.query.hasOwnProperty("show")? (view.indexOf(parseInt(this.req.query.show, 10)) > -1 ? parseInt(this.req.query.show, 10) : 0) : 0;
+                        since = this.req.query.hasOwnProperty("since") ? parseInt(this.req.query.since, 10) : 0;                        
+                        
+                        sinceDevHist = this.controller.getDevHistory(dev, since, show);            
+                        
+                        if (dev && sinceDevHist) {
+                            reply.code = 200;
+                            reply.data = {
                                 id: vDevId,
                                 since: since,
                                 deviceHistory: sinceDevHist
-                        };
+                            };
+                        } else {
+                            reply.code = 200;
+                            reply.data = dev;
+                        }
+
+                    } else if (this.req.method === "DELETE") {
+                        success = this.controller.deleteDevHistory(vDevId);
+
+                        if (success) {
+                            reply.code = 204;
+                        } else {
+                            reply.error = "Something went wrong."
+                        }
                     } else {
-                        reply.code = 200;
-                        reply.data = dev;
+                        reply.code = 400;
+                        reply.error = "Bad request."; 
                     }
                 } else {
                     reply.code = 404;
@@ -1658,7 +1602,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
                 }
             } else {
                 reply.code = 404;
-                reply.error = "No device histories found.";
+                reply.error = "No device histories found. Please check if app '24 Hours Device History' is active.";
             }
         } else {
             reply.code = 404;
@@ -1798,12 +1742,14 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
         return reply;
     },
     backup: function () {
-        var reply = {
+        var self = this,
+            reply = {
                 error: null,
                 data: null,
                 code: 500
             },
-            backupJSON = {};
+            backupJSON = {}, 
+            userModules = [];
 
         var now = new Date();
 
@@ -1819,7 +1765,23 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
         try {        
             // save all objects in storage
             for (var ind in list) {
-                backupJSON[list[ind]] = loadObject(list[ind]);
+                if (list[ind] !== "notifications" && list[ind] !== "8084AccessTimeout") { // don't create backup of 8084 and notifications
+                    backupJSON[list[ind]] = loadObject(list[ind]);
+                }
+            }
+
+            // add list of current userModules
+            _.forEach(fs.list('userModules')|| [], function(moduleName) {
+                if (fs.stat('userModules/' + moduleName).type === 'dir' && !_.findWhere(userModules, {name: moduleName})) {
+                    userModules.push({
+                        name: moduleName,
+                        version: self.controller.modules[moduleName]? self.controller.modules[moduleName].meta.version : ''
+                    });
+                }
+            });
+
+            if (userModules.length > 0) {
+                backupJSON['__userModules'] = userModules;
             }
             
             // save Z-Way and EnOcean objects
@@ -1845,7 +1807,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
             }
             */
             reply.headers= {
-                    "Content-Type": "application/x-download",
+                    "Content-Type": "application/x-download; charset=utf-8",
                     "Content-Disposition": "attachment; filename=z-way-backup-" + ts + ".zab",
                     "Connection": "keep-alive"
             }
@@ -1859,12 +1821,15 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
         return reply;
     },
     restore: function () {
-        var reqObj,
+        var self = this,
+            reqObj,
             reply = {
                 error: null,
                 data: null,
                 code: 500
-            };
+            },
+            result = "",
+            langfile = this.controller.loadMainLang();
 
         try {
             function utf8Decode(bytes) {
@@ -1879,20 +1844,20 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
 
             //this.reset();
             
-            reqObj = JSON.parse(this.req.body.backupFile.content);
+            reqObj = typeof this.req.body.backupFile.content === 'string'? JSON.parse(this.req.body.backupFile.content) : this.req.body.backupFile.content;
             
             // stop the controller
             this.controller.stop();
 
             for (var obj in reqObj.data) {
-                var dontSave = ["__ZWay","__EnOcean"]; // objects that should be ignored 
+                var dontSave = ["__ZWay","__EnOcean","__userModules","notifications","8084AccessTimeout"]; // objects that should be ignored 
                 
-                if (dontSave.indexOf(obj) > -1) break;
-                
-                saveObject(obj, reqObj.data[obj]);
+                if (dontSave.indexOf(obj) === -1) {
+                    saveObject(obj, reqObj.data[obj]);
+                }
             }
 
-            // start controller with restore flag to apply config.json and other modules configs
+            // start controller with reload flag to apply config.json
             this.controller.start(true);
             
             // restore Z-Wave and EnOcean
@@ -1905,13 +1870,241 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
                 // global.EnOcean[zenoName] && global.EnOcean[zenoName].zeno.Restore(reqObj.data["__EnOcean"][zenoName]);
             });
             */
+           
+            // install userModules
+            if (reqObj.data["__userModules"]) {
+                var installedModules = [];
+
+                _.forEach(reqObj.data["__userModules"], function(entry) {
+
+                    http.request({
+                        url:'https://developer.z-wave.me/?uri=api-module-archive/'+ entry.name,
+                        method:'GET',
+                        async: true,
+                        success: function(res){
+                            var archiv = [],
+                                item = {
+                                    name: entry.name
+                                },
+                                location = 'modules/'+ entry.name,
+                                overwriteCoreModule = false;
+
+                            if (res.data.data && res.data.data.length > 0) {
+                                archiv = _.filter(res.data.data, function (appEntry){
+                                    return appEntry.version === entry.version.toString();
+                                })
+
+                                // check if already loaded module is a core module
+                                coreModule = self.controller.modules[entry.name] && self.controller.modules[entry.name].meta? (self.controller.modules[entry.name].meta.location === location) : false;
+
+                                // check if version of core module isn't higher than the restored one
+                                if (coreModule) {
+                                    overwriteCoreModule = has_higher_version(entry.version, self.controller.modules[entry.name].meta.version);
+                                }
+
+                                // if achive was found try to download it
+                                if (archiv.length > 0 && (!coreModule || (coreModule && overwriteCoreModule))) {
+
+                                    console.log('Restore userModule', archiv[0].modulename, 'v'+archiv[0].version);
+                                    result = self.controller.installModule('https://developer.z-wave.me/archiv/'+ archiv[0].archiv, archiv[0].modulename);
+
+                                    item.status = result;
+                                    if (result === "done") {
+                                        loadSuccessfully = self.controller.reinitializeModule(entry.name, 'userModules/', true);
+
+                                        if(!loadSuccessfully){
+                                            self.controller.addNotification("warning", langfile.zaap_war_restart_necessary + ' :: ' + entry.name + ' ' + 'v'+archiv[0].version, "core", "AppInstaller");
+                                        }
+                                    } else {
+                                        self.controller.addNotification("warning", langfile.zaap_err_app_install + ' :: ' + entry.name + ' ' + 'v'+archiv[0].version, "core", "AppInstaller");
+                                    }
+                                } else {
+                                    // downlaod latest if it isn't already there
+                                    if (overwriteCoreModule) {
+                                        
+                                        console.log(entry.name+':','No archive with this version found. Install latest ...');
+                                        result = self.controller.installModule('https://developer.z-wave.me/modules/'+ entry.name +'.tar.gz', entry.name);
+
+                                        item.status = result;
+
+                                        if (result === "done") {
+                                            self.controller.reinitializeModule(entry.name, 'userModules/', false);
+                                            self.controller.addNotification("warning", langfile.zaap_war_app_installed_corrupt_instance + ' :: ' + entry.name, "core", "AppInstaller");
+                                        } else {
+                                            self.controller.addNotification("error", langfile.zaap_err_app_install + ' :: ' + entry.name, "core", "AppInstaller");
+                                        }
+                                    } else {
+                                        self.controller.addNotification("warning", langfile.zaap_war_core_app_is_newer + ' :: ' + entry.name, "core", "AppInstaller");
+                                        item.status = 'failed';
+                                    }
+                                } 
+                            } else {
+                                self.controller.addNotification("error", langfile.zaap_err_no_archives + ' :: ' + entry.name, "core", "AppInstaller");
+                                item.status = 'failed';
+                            }
+
+                            installedModules.push(item);
+                        },
+                        error: function(res){
+                            self.controller.addNotification("error", langfile.zaap_err_server + ' :: ' + entry.name + '::' + res.statusText, "core", "AppInstaller");
+                            installedModules.push({
+                                name: entry.name,
+                                status: 'failed'
+                            });
+                        }                        
+                    });
+                });
+    
+                var d = (new Date()).valueOf() + 20000; // wait not more than 20 seconds
+        
+                while ((new Date()).valueOf() < d && installedModules.length <= reqObj.data["__userModules"].length) {
+                        
+                        if (installedModules.length === reqObj.data["__userModules"].length) {
+                            break;   
+                        }
+                        
+                        processPendingCallbacks();
+                }
+
+                if (installedModules.length === reqObj.data["__userModules"].length) {
+                    // success
+                    reply.code = 200;
+                }
+
+            }
             
             // success
             reply.code = 200;
+           
         } catch (e) {
             reply.error = e.toString();
         }
         
+        return reply;
+    },
+    resetToFactoryDefault: function() {
+        var self = this,
+            langFile = this.controller.loadMainLang();
+            reply = {
+                error: null,
+                data: null,
+                code: 500
+            },
+            backupCfg = loadObject("backupConfig"),
+            storageContentList = loadObject("__storageContent"),
+            defaultConfigExists = fs.stat('defaultConfigs/config.json'), // will be added during build - build depending 
+            defaultConfig = {},
+            now = new Date();
+
+        try{
+
+            if (defaultConfigExists && defaultConfigExists.type !== 'dir' && defaultConfigExists.size > 0){
+                defaultConfig = fs.loadJSON('defaultConfigs/config.json');
+            }
+
+            if (!!defaultConfig && !_.isEmpty(defaultConfig)) {
+
+                if (zway) {
+                    var ts = now.getFullYear() + "-";
+                    ts += ("0" + (now.getMonth()+1)).slice(-2) + "-";
+                    ts += ("0" + now.getDate()).slice(-2) + "-";
+                    ts += ("0" + now.getHours()).slice(-2) + "-";
+                    ts += ("0" + now.getMinutes()).slice(-2);
+
+                    console.log('Backup config ...');
+                    // make backup of current config.json
+                    saveObject('backupConfig' + ts, loadObject('config.json'));
+
+                    // remove all active instances of moduleId
+                    this.controller.instances.forEach(function (instance) {
+                        if (instance.moduleId !== 'ZWave') {
+                            self.controller.deleteInstance(instance.id);
+                        }
+                    });
+
+                    // reset z-way controller
+                    console.log('Reset Controller ...');
+                    zway.controller.SetDefault();
+                    
+                    // remove instances of ZWave at least
+                    // filter for instances of ZWave
+                    zwInstances = this.controller.instances.filter(function (instance) {
+                        return instance.moduleId === 'ZWave';
+                    }).map(function (instance) {
+                        return instance.id;
+                    });
+
+                    // remove instance of ZWave
+                    if (zwInstances.length > 0) {
+                        zwInstances.forEach(function (instanceId) {
+                            console.log('Remove ZWave intstance: ' + instanceId);
+                            self.controller.deleteInstance(instanceId);
+                        });
+                    }
+
+                    console.log('Remove and unload userModules apps ...');
+                    // unload and remove modules
+                    Object.keys(this.controller.modules).forEach( function(className) {
+                        var meta = self.controller.modules[className],
+                            unload = '',
+                            locPath = meta.location.split('/'),
+                            success = false;
+
+                        if (locPath[0] === 'userModules'){
+                            console.log(className + ' remove it ...');
+                            
+                            success = self.controller.uninstallModule(className);
+
+                            if (success) {
+                                console.log(className + ' has been successfully removed.');
+                            } else {
+                                console.log('Cannot remove app: ' + className);
+                                self.addNotification("warning", langFile.zaap_err_uninstall_mod + ' ' + className, "core", "AutomationController");
+                            }
+                        }
+
+                    });
+
+                    // stop the controller
+                    this.controller.stop();
+                    
+                    // clean up storage
+                    for (var ind in storageContentList) {
+                        if(ind !== 'backupConfig'){
+                            saveObject(storageContentList[ind], null);
+                        }
+                    }
+
+                    // clean up storageContent
+                    if (__storageContent.length > 0) {
+                        __saveObject("__storageContent", []);
+                        __storageContent = [];
+                    }
+
+                    // set back to default config
+                    saveObject('config.json', defaultConfig);
+
+                    // start controller with reload flag to apply config.json
+                    this.controller.start(true);
+
+                    reply.code = 200;
+
+                    setTimeout(function(){
+                        self.doLogout();
+                    }, 3000);
+                } else {
+                    reply.code = 404;
+                    reply.error = 'Unable to reset controller. Z-Way not found.';
+                }
+                
+            } else {
+                reply.code = 404;
+                reply.error = 'No default configuration file found.';
+            }
+        } catch (e) {
+            reply.error = 'Something went wrong. Error: ' + e.message;
+        }
+
         return reply;
     },
     getTime: function () {
@@ -2038,7 +2231,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
         }
 
         return reply;
-    },
+    }/*,
     getTrustMyNetwork: function() {
         var reply = {
                 error: null,
@@ -2080,7 +2273,7 @@ _.extend(ZAutomationAPIWebRequest.prototype, {
         }
 
         return reply;
-    }
+    }*/
 });
 
 ZAutomationAPIWebRequest.prototype.profileByUser = function(userId) {
@@ -2195,7 +2388,7 @@ ZAutomationAPIWebRequest.prototype.dispatchRequest = function (method, url) {
                         }
                     }
                 } else {
-                    handlerFunc = matched.handler;
+                    handlerFunc = matched.handler? matched.handler : handlerFunc;
                 }
 
                 // --- Proceed to checkout =)
@@ -2206,6 +2399,8 @@ ZAutomationAPIWebRequest.prototype.dispatchRequest = function (method, url) {
                 return this.Forbidden;
 
             }
+        } else {
+            return handlerFunc;
         }
     }
 };

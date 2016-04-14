@@ -1,9 +1,9 @@
 /*** LogicalRules Z-Way HA module *******************************************
 
-Version: 1.2.0
+Version: 1.2.2
 (c) Z-Wave.Me, 2014
 -----------------------------------------------------------------------------
-Author: Poltorak Serguei <ps@z-wave.me>, Niels Roche <nir@zwave.eu>
+Author: Poltorak Serguei <ps@z-wave.me>, Niels Roche <nir@zwave.eu>, Yurkin Vitaliy <aivs@z-wave.me>
 Description:
     Implements logical rules and activates scene on rule match.
 ******************************************************************************/
@@ -173,19 +173,33 @@ LogicalRules.prototype.testRule = function (tree) {
         tree.action.switches && tree.action.switches.forEach(function(devState) {
             var vDev = self.controller.devices.get(devState.device);
             if (vDev) {
-                vDev.performCommand(devState.status);
+                if (!devState.sendAction || (devState.sendAction && vDev.get("metrics:level") != devState.status)) {
+                    vDev.performCommand(devState.status);
+                }
             }
         });
         tree.action.dimmers && tree.action.dimmers.forEach(function(devState) {
             var vDev = self.controller.devices.get(devState.device);
             if (vDev) {
-                vDev.performCommand("exact", { level: devState.status });
+                if (!devState.sendAction || (devState.sendAction && vDev.get("metrics:level") != devState.status)) {
+                    vDev.performCommand("exact", { level: devState.status });
+                }
+            }
+        });
+        tree.action.thermostats && tree.action.thermostats.forEach(function(devState) {
+            var vDev = self.controller.devices.get(devState.device);
+            if (vDev) {
+                if (!devState.sendAction || (devState.sendAction && vDev.get("metrics:level") != devState.status)) {
+                    vDev.performCommand("exact", { level: devState.status });
+                }
             }
         });
         tree.action.locks && tree.action.locks.forEach(function(devState) {
             var vDev = self.controller.devices.get(devState.device);
             if (vDev) {
-                vDev.performCommand(devState.status);
+                if (!devState.sendAction || (devState.sendAction && vDev.get("metrics:level") != devState.status)) {
+                    vDev.performCommand(devState.status);
+                }
             }
         });
         tree.action.scenes && tree.action.scenes.forEach(function(scene) {

@@ -161,6 +161,11 @@
         }
       }
     }
+
+    // Remove modules_categories from config
+    if (config.hasOwnProperty('modules_categories')) {
+      delete config.modules_categories;
+    }
       
     // Add permanently_hidden, h, visibility, hasHistory properties
     Object.keys(config.vdevInfo).forEach(function(id) {
@@ -352,6 +357,11 @@
 
         if(!profile.expert_view && (profile.role === 1 || profile.role === 3)){
           profile.expert_view = false;
+        }
+
+        // delete profile.passwordConfirm 
+        if(profile.passwordConfirm){
+            delete profile.passwordConfirm;
         }
       });
   
